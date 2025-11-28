@@ -2,8 +2,9 @@
   const eventSelector = '.schedule-event';
   const overlaySelector = '.message-overlay';
 
-  // Undo stack for deleted events
+  // Undo/Redo stacks for deleted events
   const deletedEvents = [];
+  const redoStack = [];
 
   function addDeleteButtons() {
     const nodes = document.querySelectorAll(eventSelector);
@@ -13,7 +14,7 @@
 
       const btn = document.createElement('button');
       btn.textContent = '✕';
-      btn.title = 'Remove this event (Ctrl+Z to undo)';
+      btn.title = 'Remove this event (Ctrl+Z to undo, Ctrl+Y to redo)';
       btn.style.cssText = `
         position: absolute;
         top: 2px;
@@ -35,8 +36,9 @@
         const parent = el.parentElement;
         const nextSibling = el.nextElementSibling;
         deletedEvents.push({ element: el, parent, nextSibling });
+        redoStack.length = 0; // Clear redo stack on new delete
         el.remove();
-        console.log('Event deleted. Press Ctrl+Z to undo. Stack:', deletedEvents.length);
+        console.log('Event deleted. Ctrl+Z undo, Ctrl+Y redo. Stack:', deletedEvents.length);
       });
 
       const pos = getComputedStyle(el).position;
@@ -54,15 +56,31 @@
     const { element, parent, nextSibling } = deletedEvents.pop();
     if (parent) {
       parent.insertBefore(element, nextSibling);
-      console.log('Event restored. Stack:', deletedEvents.length);
+      redoStack.push({ element, parent, nextSibling });
+      console.log('Event restored. Undo stack:', deletedEvents.length, 'Redo stack:', redoStack.length);
     }
   }
 
-  // Listen for Ctrl+Z
+  function redoDelete() {
+    if (redoStack.length === 0) {
+      console.log('Nothing to redo');
+      return;
+    }
+    const { element, parent, nextSibling } = redoStack.pop();
+    deletedEvents.push({ element, parent, nextSibling });
+    element.remove();
+    console.log('Redo: removed again. Undo stack:', deletedEvents.length, 'Redo stack:', redoStack.length);
+  }
+
+  // Listen for Ctrl+Z (undo) and Ctrl+Y (redo)
   document.addEventListener('keydown', (e) => {
     if (e.ctrlKey && e.key === 'z') {
       e.preventDefault();
       undoDelete();
+    }
+    if (e.ctrlKey && e.key === 'y') {
+      e.preventDefault();
+      redoDelete();
     }
   });
 
@@ -101,7 +119,13 @@
     return placeMap[eventLeft] || null;
   }
 
-  async function extractEvents() {
+  async function extractEvents(eventDate = null) {
+    if (eventDate) {
+      console.log('Extracting events for date:', eventDate);
+    } else {
+      console.log('No date provided.');
+      return;
+    }
     const nodes = Array.from(document.querySelectorAll(eventSelector)).filter(n => document.body.contains(n));
     console.log('Found', nodes.length, 'events to extract');
     const placeMap = buildPlaceMap();
@@ -169,11 +193,103 @@
     }
 
     window.extractedEvents = results;
-    console.log('Done! Access via window.extractedEvents or paste from clipboard');
+    downloadICS(results, eventDate, 'sfn-events.ics');
     return results;
   }
 
-  window.calendarHelper = { addDeleteButtons, extractEvents, undoDelete };
+  // ICS file generation
+  function escapeICS(str) {
+    if (!str) return '';
+    return str
+      .replace(/\\/g, '\\\\')
+      .replace(/;/g, '\\;')
+      .replace(/,/g, '\\,')
+      .replace(/\n/g, '\\n');
+  }
+
+  function generateUID() {
+    return 'sfn-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9) + '@calendar';
+  }
+
+  function formatICSDate(dateStr, timeStr) {
+    // dateStr: "2025-11-28" or similar, timeStr: "12:15"
+    // Returns: 20251128T121500
+    const [hours, minutes] = timeStr.split(':');
+    const date = dateStr.replace(/-/g, '');
+    return `${date}T${hours.padStart(2, '0')}${minutes.padStart(2, '0')}00`;
+  }
+
+  function generateICS(events, eventDate = null) {
+    // eventDate should be in format "YYYY-MM-DD" (e.g., "2025-01-18")
+    // If not provided, tries to extract from page or uses today
+    if (!eventDate) {
+      // Try to get date from page title or use today
+      const today = new Date();
+      eventDate = today.toISOString().split('T')[0];
+      console.log('No date provided, using:', eventDate);
+    }
+
+    const lines = [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'PRODID:-//SFN Calendar Helper//EN',
+      'CALSCALE:GREGORIAN',
+      'METHOD:PUBLISH',
+      'X-WR-CALNAME:Śląski Festiwal Nauki'
+    ];
+
+    for (const event of events) {
+      if (event._failed) continue;
+      
+      const dtStart = formatICSDate(eventDate, event.start);
+      const dtEnd = formatICSDate(eventDate, event.end);
+      const uid = generateUID();
+      const now = new Date().toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
+
+      lines.push('BEGIN:VEVENT');
+      lines.push(`UID:${uid}`);
+      lines.push(`DTSTAMP:${now}`);
+      lines.push(`DTSTART:${dtStart}`);
+      lines.push(`DTEND:${dtEnd}`);
+      lines.push(`SUMMARY:${escapeICS(event.title)}`);
+      if (event.place) {
+        lines.push(`LOCATION:${escapeICS(event.place)}`);
+      }
+      if (event.description) {
+        lines.push(`DESCRIPTION:${escapeICS(event.description)}`);
+      }
+      lines.push('END:VEVENT');
+    }
+
+    lines.push('END:VCALENDAR');
+    return lines.join('\r\n');
+  }
+
+  function downloadICS(events = null, eventDate = null, filename = 'sfn-events.ics') {
+    events = events || window.extractedEvents;
+    if (!events || events.length === 0) {
+      console.error('No events to export! Run extractEvents() first.');
+      return;
+    }
+
+    const icsContent = generateICS(events, eventDate);
+    const blob = new Blob([icsContent], { type: 'text/calendar;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    
+    console.log('✓ Downloaded', filename, 'with', events.filter(e => !e._failed).length, 'events');
+  }
+
+  window.calendarHelper = { addDeleteButtons, extractEvents, undoDelete, redoDelete, generateICS, downloadICS };
   addDeleteButtons();
-  console.log('Ready! Run: calendarHelper.extractEvents() | Ctrl+Z to undo delete');
+  console.log('Ready! Commands:');
+  console.log('  calendarHelper.extractEvents("YYYY-MM-DD") - scrape visible events and download as .ics');
+  console.log('  Ctrl+Z = undo delete, Ctrl+Y = redo');
 })();
