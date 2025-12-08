@@ -5,6 +5,9 @@
   // Undo/Redo stacks for deleted events
   const deletedEvents = [];
   const redoStack = [];
+  
+  // Cache for event descriptions (keyed by title+start+end)
+  const descriptionCache = new Map();
 
   function addDeleteButtons() {
     const nodes = document.querySelectorAll(eventSelector);
@@ -37,8 +40,9 @@
         const nextSibling = el.nextElementSibling;
         deletedEvents.push({ element: el, parent, nextSibling });
         redoStack.length = 0; // Clear redo stack on new delete
+        const title = getEventTitle(el);
         el.remove();
-        console.log('Event deleted. Ctrl+Z undo, Ctrl+Y redo. Stack:', deletedEvents.length);
+        console.log(`Deleted: ${title} | Undo stack: ${deletedEvents.length} | Redo stack: ${redoStack.length}`);
       });
 
       const pos = getComputedStyle(el).position;
@@ -46,6 +50,14 @@
       el.appendChild(btn);
     });
     console.log('Delete buttons added to', nodes.length, 'events');
+  }
+
+  function getEventTitle(element) {
+    try {
+      return element.innerText.trim().slice(0, 50);
+    } catch (e) {
+      return '(unknown)';
+    }
   }
 
   function undoDelete() {
@@ -57,7 +69,8 @@
     if (parent) {
       parent.insertBefore(element, nextSibling);
       redoStack.push({ element, parent, nextSibling });
-      console.log('Event restored. Undo stack:', deletedEvents.length, 'Redo stack:', redoStack.length);
+      const title = getEventTitle(element);
+      console.log(`Restored: ${title} | Undo stack: ${deletedEvents.length} | Redo stack: ${redoStack.length}`);
     }
   }
 
@@ -68,8 +81,9 @@
     }
     const { element, parent, nextSibling } = redoStack.pop();
     deletedEvents.push({ element, parent, nextSibling });
+    const title = getEventTitle(element);
     element.remove();
-    console.log('Redo: removed again. Undo stack:', deletedEvents.length, 'Redo stack:', redoStack.length);
+    console.log(`Re-deleted: ${title} | Undo stack: ${deletedEvents.length} | Redo stack: ${redoStack.length}`);
   }
 
   // Listen for Ctrl+Z (undo) and Ctrl+Y (redo)
@@ -120,16 +134,34 @@
   }
 
   async function extractEvents(eventDate = null) {
-    if (eventDate) {
-      console.log('Extracting events for date:', eventDate);
-    } else {
-      console.log('No date provided.');
+    // Validate eventDate
+    if (!eventDate) {
+      console.log('No date provided. Exiting.');
       return;
     }
+    // Parse eventDate and compare to today
+    const todayStr = new Date().toISOString().split('T')[0];
+    let parsedDate = null;
+    try {
+      parsedDate = new Date(eventDate);
+      if (isNaN(parsedDate.getTime())) throw new Error('Invalid date');
+    } catch (e) {
+      console.log('Invalid date provided. Exiting.');
+      return;
+    }
+    const eventDateStr = parsedDate.toISOString().split('T')[0];
+    if (eventDateStr < todayStr) {
+      console.log('Provided date is in the past. Exiting.');
+      return;
+    }
+    console.log('Extracting events for date:', eventDateStr);
+    eventDate = eventDateStr;
     const nodes = Array.from(document.querySelectorAll(eventSelector)).filter(n => document.body.contains(n));
     console.log('Found', nodes.length, 'events to extract');
     const placeMap = buildPlaceMap();
     const results = [];
+    let cachedCount = 0;
+    let scrapedCount = 0;
 
     for (let i = 0; i < nodes.length; i++) {
       const n = nodes[i];
@@ -140,6 +172,24 @@
       const innerHTML = n.children[0].innerHTML;
       const { start, end, title } = getTimeAndTitle(innerHTML);
       const place = getPlace(n, placeMap);
+      
+      // Cache key based on unique event identifiers
+      const cacheKey = `${title}|${start}|${end}`;
+      
+      // Check if we already have the description cached
+      if (descriptionCache.has(cacheKey)) {
+        const cachedDesc = descriptionCache.get(cacheKey);
+        results.push({
+          title: title,
+          place: place,
+          start: start,
+          end: end,
+          description: cachedDesc
+        });
+        cachedCount++;
+        console.log(i, 'cached:', title?.slice(0, 40));
+        continue;
+      }
 
       console.log(i, 'clicking:', n.innerText.trim().slice(0, 50));
 
@@ -159,6 +209,9 @@
         continue;
       }
       const description = getDescription();
+      
+      // Cache the description for future extractions
+      descriptionCache.set(cacheKey, description);
 
       const scraped = {
         title: title,
@@ -168,6 +221,7 @@
         description: description
       };
       results.push(scraped);
+      scrapedCount++;
       console.log(i, 'scraped:', scraped.title?.slice(0, 40));
 
       // Close overlay
@@ -193,7 +247,8 @@
     }
 
     window.extractedEvents = results;
-    downloadICS(results, eventDate, 'sfn-events.ics');
+    console.log(`Done! ${cachedCount} from cache, ${scrapedCount} newly scraped`);
+      downloadICS(results, eventDate);
     return results;
   }
 
@@ -265,11 +320,20 @@
     return lines.join('\r\n');
   }
 
-  function downloadICS(events = null, eventDate = null, filename = 'sfn-events.ics') {
+  function downloadICS(events = null, eventDate = null, filename = null) {
     events = events || window.extractedEvents;
     if (!events || events.length === 0) {
       console.error('No events to export! Run extractEvents() first.');
       return;
+    }
+
+    // If no filename provided, build one using the provided date (or today)
+    if (!filename) {
+      let dateForName = eventDate;
+      if (!dateForName) {
+        dateForName = new Date().toISOString().split('T')[0];
+      }
+      filename = `sfn-events-${dateForName}.ics`;
     }
 
     const icsContent = generateICS(events, eventDate);
