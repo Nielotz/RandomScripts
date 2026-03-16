@@ -13,7 +13,7 @@
 
   function getEventCards() {
     return Array.from(document.querySelectorAll(`div.${eventCardClass}.absolute.rounded-xl`))
-      .filter(el => document.body.contains(el) && el.dataset.hidden !== '1');
+      .filter(el => document.body.contains(el));
   }
 
   function addDeleteButtons() {
@@ -42,11 +42,12 @@
       btn.addEventListener('click', (ev) => {
         ev.stopPropagation();
         ev.preventDefault();
-        deletedEvents.push(el);
+        const parent = el.parentElement;
+        const nextSibling = el.nextElementSibling;
+        deletedEvents.push({ element: el, parent, nextSibling });
         redoStack.length = 0;
         const title = getCardTitle(el);
-        el.dataset.hidden = '1';
-        el.style.display = 'none';
+        el.remove();
         console.log(`Deleted: ${title} | Undo: ${deletedEvents.length} | Redo: ${redoStack.length}`);
       });
 
@@ -64,20 +65,20 @@
 
   function undoDelete() {
     if (deletedEvents.length === 0) { console.log('Nothing to undo'); return; }
-    const el = deletedEvents.pop();
-    el.dataset.hidden = '';
-    el.style.display = '';
-    redoStack.push(el);
-    console.log(`Restored: ${getCardTitle(el)} | Undo: ${deletedEvents.length} | Redo: ${redoStack.length}`);
+    const { element, parent, nextSibling } = deletedEvents.pop();
+    if (parent) {
+      parent.insertBefore(element, nextSibling);
+      redoStack.push({ element, parent, nextSibling });
+      console.log(`Restored: ${getCardTitle(element)} | Undo: ${deletedEvents.length} | Redo: ${redoStack.length}`);
+    }
   }
 
   function redoDelete() {
     if (redoStack.length === 0) { console.log('Nothing to redo'); return; }
-    const el = redoStack.pop();
-    deletedEvents.push(el);
-    el.dataset.hidden = '1';
-    el.style.display = 'none';
-    console.log(`Re-deleted: ${getCardTitle(el)} | Undo: ${deletedEvents.length} | Redo: ${redoStack.length}`);
+    const { element, parent, nextSibling } = redoStack.pop();
+    deletedEvents.push({ element, parent, nextSibling });
+    element.remove();
+    console.log(`Re-deleted: ${getCardTitle(element)} | Undo: ${deletedEvents.length} | Redo: ${redoStack.length}`);
   }
 
   document.addEventListener('keydown', (e) => {
